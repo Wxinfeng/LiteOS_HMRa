@@ -1,0 +1,119 @@
+/* ========================================================================== *
+ *                                                                            *
+ *         Copyright (C) 2014-2016 Huawei Technologies Co., Ltd.              *
+ *                         All rights reserved.                               *
+ *                                                                            *
+ * THIS SOFTWARE IS PROVIDED BY Huawei Technologies Co., Ltd. ``AS IS'' AND   *
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE      *
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE *
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE    *
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL *
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS    *
+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)      *
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT *
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY  *
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF     *
+ * SUCH DAMAGE.                                                               *
+ *                                                                            *
+ * ========================================================================== */
+
+#include "umini.h"
+#include "umini_prv.h"
+
+PFN_ONRECV    g_pfnUminiOnRecv = UM_NULL;
+ST_UMINI_MGR  g_stUminiMgr = {0};
+
+UM_RET UMini_Initial(PFN_ONRECV pfnOnRecv)
+{
+    g_pfnUminiOnRecv = pfnOnRecv;
+    g_stUminiMgr.hTransSock = UMini_SockCreate();
+    return UM_OK;
+}
+
+UM_RET UMini_Destroy()
+{
+    UMini_SockClose(g_stUminiMgr.hTransSock);
+    UMini_MemSet(&g_stUminiMgr, sizeof(ST_UMINI_MGR), 0, sizeof(ST_UMINI_MGR));
+    return UM_OK;
+}
+
+UM_RET UMini_Report(UM_UINT8 nType, UM_UINT8 *pucData, UM_SIZE nLen)
+{
+    ST_UMINI_BUFF *pstBuff;
+    UM_SIZE nIndex;
+
+    if (nLen >= UMINI_BUF_MAX_LEN)
+        return UM_ERR_OVERFLOW;
+
+    for (nIndex = 0; nIndex < UMINI_BUF_MAX_CNT; nIndex++)
+    {
+        pstBuff = &g_stUminiMgr.stReportBuf[nIndex];
+        if (0 == pstBuff->u8Flag)
+        {
+            pstBuff->u8Flag = 1;
+            pstBuff->uiBufLen = nLen;
+            UMini_MemCpy(pstBuff->aucBuf, UMINI_BUF_MAX_LEN, pucData, nLen);
+            break;
+        }
+    }
+
+    return UMini_Drive();
+}
+
+UM_RET UMini_Drive()
+{
+    ST_UMINI_BUFF *pstBuff;
+    UM_SIZE nIndex;
+
+    if (EN_UMINI_STA_ACTIVE != g_stUminiMgr.u8LoginFlag)
+        return UMini_Login();
+
+    for (nIndex = 0; nIndex < UMINI_BUF_MAX_CNT; nIndex++)
+    {
+        pstBuff = &g_stUminiMgr.stReportBuf[nIndex];
+        if (0 == pstBuff->u8Flag) continue;
+
+        pstBuff->u8Flag++;
+        UMini_SockSendTo(g_stUminiMgr.hTransSock, pstBuff->aucBuf, pstBuff->uiBufLen,
+                         g_stUminiMgr.pucServerIp, g_stUminiMgr.usServerPort);
+
+        if (pstBuff->u8Flag > UMINI_BUF_RETRY_TIMES)
+            pstBuff->u8Flag = 0;
+    }
+
+    return UM_OK;
+}
+
+UM_UINT8 UMini_Login()
+{
+    UM_UINT8 aucCoapBuf[UMINI_BUF_MAX_LEN];
+    ST_UMCOAP_PKT stCoapPkt = {0};
+    UM_SIZE nCoapLen = 0;
+
+    switch (g_stUminiMgr.u8LoginFlag)
+    {
+        case EN_UMINI_STA_BIND:
+            stCoapPkt.stHdr.ucMsgType = EN_UMCOAP_MSG_CON;
+            stCoapPkt.stHdr.ucStatusCode = 0;
+            stCoapPkt.stHdr.aucId[0] = 0x01;
+            stCoapPkt.stHdr.aucId[1] = 0x51;
+            break;
+        case EN_UMINI_STA_REGING:
+            break;
+        case EN_UMINI_STA_ACTIVE:
+            break;
+        //case EN_UMINI_STA_IDLE:
+        default:
+            nCoapLen = UMini_CoapEncode(&stCoapPkt, aucCoapBuf, UMINI_BUF_MAX_LEN);
+            break;
+    }
+
+    if (0 != nCoapLen)
+    {
+        UMini_SockSendTo(g_stUminiMgr.hTransSock, aucCoapBuf, nCoapLen,
+                         g_stUminiMgr.pucServerIp, g_stUminiMgr.usServerPort);
+    }
+
+    return UM_OK;
+}
+
